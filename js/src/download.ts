@@ -5,7 +5,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -14,6 +14,7 @@ import { extract as tarExtract } from "tar";
 
 import type { BinaryInfo } from "./types.js";
 import {
+  BINARY_SIGNING_PUBKEYS,
   DOWNLOAD_BASE_URL,
   GITHUB_API_URL,
   GITHUB_DOWNLOAD_BASE_URL,
@@ -195,10 +196,11 @@ async function downloadAndExtract(version?: string): Promise<void> {
       await downloadFile(fallbackUrl, tmpPath);
     }
 
-    // Verify checksum before extraction
-    if (process.env.CLOAKBROWSER_SKIP_CHECKSUM?.toLowerCase() !== "true") {
-      await verifyDownloadChecksum(tmpPath, version);
-    }
+    // Verify the download before extraction. On the official path this is a
+    // mandatory, non-bypassable Ed25519 signature check (see
+    // verifyDownloadChecksum); the skip flag only applies to custom
+    // self-hosted CLOAKBROWSER_DOWNLOAD_URL setups.
+    await verifyDownloadChecksum(tmpPath, version);
 
     await extractArchive(tmpPath, binaryDir, binaryPath);
     showWelcome();
@@ -210,22 +212,176 @@ async function downloadAndExtract(version?: string): Promise<void> {
   }
 }
 
-async function verifyDownloadChecksum(filePath: string, version?: string): Promise<void> {
-  const checksums = await fetchChecksums(version);
+/** @internal Exported for testing only. */
+export async function verifyDownloadChecksum(filePath: string, version?: string): Promise<void> {
   const tarballName = getArchiveName();
 
-  if (!checksums) {
-    console.warn("[cloakbrowser] SHA256SUMS not available for this release — skipping checksum verification");
+  if (process.env.CLOAKBROWSER_DOWNLOAD_URL) {
+    // Self-hosted mirror: the pinned signature keys do not apply to a
+    // third-party server. Preserve the legacy same-origin checksum behavior,
+    // skippable via CLOAKBROWSER_SKIP_CHECKSUM.
+    if (process.env.CLOAKBROWSER_SKIP_CHECKSUM?.toLowerCase() === "true") {
+      console.warn(
+        "[cloakbrowser] CLOAKBROWSER_SKIP_CHECKSUM set — skipping verification for custom download URL"
+      );
+      return;
+    }
+    const checksums = await fetchChecksums(version);
+    if (!checksums) {
+      console.warn(
+        "[cloakbrowser] SHA256SUMS not available from custom URL — skipping checksum verification"
+      );
+      return;
+    }
+    const expectedCustom = checksums.get(tarballName);
+    if (!expectedCustom) {
+      console.warn(
+        `[cloakbrowser] SHA256SUMS found but no entry for ${tarballName} — skipping verification`
+      );
+      return;
+    }
+    await verifyChecksum(filePath, expectedCustom);
     return;
   }
 
+  // Official path: signature is the trust root and is non-bypassable.
+  const manifest = await fetchSignedManifest(version);
+  if (!manifest) {
+    throw new Error(
+      "Could not fetch a signed SHA256SUMS (SHA256SUMS + SHA256SUMS.sig) for " +
+        "this release — refusing to use an unverified binary. " +
+        "Retry, or report at https://github.com/CloakHQ/cloakbrowser/issues"
+    );
+  }
+  const { manifestBytes, sigBytes } = manifest;
+  verifySignature(manifestBytes, sigBytes);
+  const manifestText = new TextDecoder().decode(manifestBytes);
+
+  // Version binding: the signed manifest must declare the version we asked for.
+  // The signature proves "we made this manifest", not "this is the version you
+  // requested" — without this check a mirror could serve a genuinely-signed
+  // older release in place of the requested one (forced downgrade).
+  const requested = version || getChromiumVersion();
+  const declared = parseManifestVersion(manifestText);
+  if (declared !== requested) {
+    throw new Error(
+      `Version mismatch in signed SHA256SUMS: requested ${requested}, ` +
+        `manifest declares ${declared ?? "none"}. Refusing (possible downgrade).`
+    );
+  }
+
+  const checksums = parseChecksums(manifestText);
   const expected = checksums.get(tarballName);
   if (!expected) {
-    console.warn(`[cloakbrowser] SHA256SUMS found but no entry for ${tarballName} — skipping verification`);
-    return;
+    throw new Error(
+      `Signature-verified SHA256SUMS has no entry for ${tarballName} — ` +
+        `cannot confirm binary integrity.`
+    );
+  }
+  await verifyChecksum(filePath, expected);
+}
+
+/**
+ * Read the 'version=<v>' line from a signed manifest. null if absent.
+ * The line has no internal whitespace so older wrappers' SHA256SUMS parsers
+ * ignore it (they only accept '<hash>  <filename>' lines).
+ * @internal Exported for testing only.
+ */
+export function parseManifestVersion(text: string): string | null {
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("version=")) {
+      return line.slice("version=".length).trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Fetch (SHA256SUMS, SHA256SUMS.sig) raw bytes for a version, or null.
+ * Both files come from the SAME origin so the signature always matches the
+ * exact manifest bytes it certifies. Primary origin first, then GitHub mirror.
+ * @internal Exported for testing only.
+ */
+export async function fetchSignedManifest(
+  version?: string
+): Promise<{ manifestBytes: Uint8Array; sigBytes: Uint8Array } | null> {
+  const v = version || getChromiumVersion();
+  const bases = [
+    `${DOWNLOAD_BASE_URL}/chromium-v${v}`,
+    `${GITHUB_DOWNLOAD_BASE_URL}/chromium-v${v}`,
+  ];
+  for (const base of bases) {
+    try {
+      const manifestResp = await fetch(`${base}/SHA256SUMS`, {
+        redirect: "follow",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!manifestResp.ok) continue;
+      const sigResp = await fetch(`${base}/SHA256SUMS.sig`, {
+        redirect: "follow",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!sigResp.ok) continue;
+      return {
+        manifestBytes: new Uint8Array(await manifestResp.arrayBuffer()),
+        sigBytes: new Uint8Array(await sigResp.arrayBuffer()),
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Verify a detached Ed25519 signature over the raw manifest bytes.
+ * sigB64Bytes is the (base64-text) content of SHA256SUMS.sig. Tries each pinned
+ * key; succeeds if any validates. Throws if malformed or no key validates.
+ * @internal Exported for testing only.
+ */
+export function verifySignature(manifestBytes: Uint8Array, sigB64Bytes: Uint8Array): void {
+  // Node's Buffer.from(...,"base64") is lenient — it silently drops invalid
+  // characters instead of throwing. Validate by canonical round-trip so a
+  // malformed .sig is reported as such (parity with Python's
+  // base64.b64decode(validate=True)).
+  const sigText = new TextDecoder().decode(sigB64Bytes).trim();
+  const signature = Buffer.from(sigText, "base64");
+  if (signature.toString("base64") !== sigText) {
+    throw new Error("Malformed SHA256SUMS.sig (not valid base64)");
   }
 
-  await verifyChecksum(filePath, expected);
+  for (const pubkeyB64 of BINARY_SIGNING_PUBKEYS) {
+    let keyObject;
+    try {
+      // Build an Ed25519 public key from raw 32 bytes via JWK import.
+      const x = Buffer.from(pubkeyB64, "base64").toString("base64url");
+      keyObject = createPublicKey({
+        key: { kty: "OKP", crv: "Ed25519", x },
+        format: "jwk",
+      });
+    } catch {
+      // Skip an unparseable pinned key (e.g. the placeholder); another may validate.
+      continue;
+    }
+    try {
+      if (cryptoVerify(null, manifestBytes, keyObject, signature)) {
+        console.log("[cloakbrowser] SHA256SUMS signature verified: Ed25519 OK");
+        return;
+      }
+    } catch {
+      // A malformed/wrong-length signature can make verify throw rather than
+      // return false — treat it as a non-match and try the next pinned key
+      // (parity with Python's try/except around pub.verify), failing closed below.
+      continue;
+    }
+  }
+
+  throw new Error(
+    "SHA256SUMS signature verification failed — no pinned key validated the " +
+      "manifest. The binary's authenticity could not be confirmed. " +
+      "Report at https://github.com/CloakHQ/cloakbrowser/issues"
+  );
 }
 
 /** @internal Exported for testing only. */

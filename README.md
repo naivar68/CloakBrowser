@@ -254,7 +254,7 @@ The binary includes 58 source-level patches covering canvas, WebGL, audio, fonts
 
 These are compiled into the Chromium binary — not injected via JavaScript, not set via flags.
 
-Binary downloads are verified with SHA-256 checksums to ensure integrity.
+Binary downloads are verified against a pinned Ed25519 signature on the published checksums before extraction, so the download is confirmed authentic (genuinely ours) and not just intact. A compromised mirror cannot serve a tampered or downgraded binary.
 
 ## API
 
@@ -621,7 +621,7 @@ Access the original un-patched Playwright page at `page._original` if you need r
 | `CLOAKBROWSER_CACHE_DIR` | `~/.cloakbrowser` | Binary cache directory |
 | `CLOAKBROWSER_DOWNLOAD_URL` | `cloakbrowser.dev` | Custom download URL for binary |
 | `CLOAKBROWSER_AUTO_UPDATE` | `true` | Set to `false` to disable background update checks |
-| `CLOAKBROWSER_SKIP_CHECKSUM` | `false` | Set to `true` to skip SHA-256 verification after download |
+| `CLOAKBROWSER_SKIP_CHECKSUM` | `false` | Only applies to a custom `CLOAKBROWSER_DOWNLOAD_URL`: set to `true` to skip its checksum check. Signature verification on the official download path is mandatory and cannot be skipped. |
 | `CLOAKBROWSER_GEOIP_TIMEOUT_SECONDS` | `5` | Max seconds for GeoIP resolution before continuing without it |
 | `CLOAKBROWSER_WIDEVINE_CDM` | — | Path to a sideloaded `WidevineCdm` directory (overrides auto-detection next to the binary). See [Widevine / DRM](#widevine--drm) |
 | `CLOAKBROWSER_WIDEVINE` | `1` | Set to `0` to disable automatic Widevine hint-file seeding for persistent contexts |
@@ -1288,7 +1288,7 @@ A: Yes. Pass `proxy="http://user:pass@host:port"` or `proxy="socks5://user:pass@
 
 ## Security
 
-All releases are signed for supply chain verification.
+The wrapper automatically verifies every binary download against a pinned Ed25519 signature on the published checksums before extraction — a compromised mirror cannot serve a tampered or downgraded binary. Releases are additionally signed for manual supply chain verification:
 
 ```bash
 # Verify GPG signature (binary release tag)

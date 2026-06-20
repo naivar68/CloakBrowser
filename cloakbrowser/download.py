@@ -23,6 +23,7 @@ import httpx
 
 from ._version import __version__ as _wrapper_version
 from .config import (
+    BINARY_SIGNING_PUBKEYS,
     CHROMIUM_VERSION,
     DOWNLOAD_BASE_URL,
     GITHUB_API_URL,
@@ -162,9 +163,11 @@ def _download_and_extract(version: str | None = None) -> None:
             )
             _download_file(fallback_url, tmp_path)
 
-        # Verify checksum before extraction
-        if os.environ.get("CLOAKBROWSER_SKIP_CHECKSUM", "").lower() != "true":
-            _verify_download_checksum(tmp_path, version)
+        # Verify the download before extraction. On the official path this is a
+        # mandatory, non-bypassable Ed25519 signature check (see
+        # _verify_download_checksum); the skip flag only applies to custom
+        # self-hosted CLOAKBROWSER_DOWNLOAD_URL setups.
+        _verify_download_checksum(tmp_path, version)
 
         _extract_archive(tmp_path, binary_dir, binary_path)
         _show_welcome()
@@ -174,20 +177,157 @@ def _download_and_extract(version: str | None = None) -> None:
 
 
 def _verify_download_checksum(file_path: Path, version: str | None = None) -> None:
-    """Fetch SHA256SUMS and verify the downloaded file. Warn if unavailable, fail on mismatch."""
-    checksums = _fetch_checksums(version)
+    """Verify the downloaded archive's integrity and authenticity.
+
+    Official path (cloakbrowser.dev / GitHub Releases): fetch SHA256SUMS plus
+    its detached Ed25519 signature SHA256SUMS.sig, verify the signature against
+    the pinned public keys FIRST, then verify the archive's SHA-256 against the
+    now-authenticated manifest. Mandatory and non-bypassable — a same-origin
+    manifest can no longer certify a tampered binary (#308).
+
+    Custom self-hosted path (CLOAKBROWSER_DOWNLOAD_URL set): the pinned keys do
+    not apply to a third-party server, so fall back to the plain same-origin
+    SHA256SUMS check, which CLOAKBROWSER_SKIP_CHECKSUM may bypass.
+    """
     tarball_name = get_archive_name()
 
-    if checksums is None:
-        logger.warning("SHA256SUMS not available for this release — skipping checksum verification")
+    if os.environ.get("CLOAKBROWSER_DOWNLOAD_URL"):
+        # Self-hosted mirror: signature scheme does not apply. Preserve the
+        # legacy same-origin checksum behavior, skippable as before.
+        if os.environ.get("CLOAKBROWSER_SKIP_CHECKSUM", "").lower() == "true":
+            logger.warning(
+                "CLOAKBROWSER_SKIP_CHECKSUM set — skipping verification for custom download URL"
+            )
+            return
+        checksums = _fetch_checksums(version)
+        if checksums is None:
+            logger.warning(
+                "SHA256SUMS not available from custom URL — skipping checksum verification"
+            )
+            return
+        expected = checksums.get(tarball_name)
+        if expected is None:
+            logger.warning(
+                "SHA256SUMS found but no entry for %s — skipping verification", tarball_name
+            )
+            return
+        _verify_checksum(file_path, expected)
         return
 
+    # Official path: signature is the trust root and is non-bypassable.
+    manifest = _fetch_signed_manifest(version)
+    if manifest is None:
+        raise RuntimeError(
+            "Could not fetch a signed SHA256SUMS (SHA256SUMS + SHA256SUMS.sig) "
+            "for this release — refusing to use an unverified binary. "
+            "Retry, or report at https://github.com/CloakHQ/cloakbrowser/issues"
+        )
+    manifest_bytes, sig_bytes = manifest
+    _verify_signature(manifest_bytes, sig_bytes)
+    manifest_text = manifest_bytes.decode("utf-8")
+
+    # Version binding: the signed manifest must declare the version we asked for.
+    # The signature proves "we made this manifest", not "this is the version you
+    # requested" — without this check a mirror could serve a genuinely-signed
+    # older release in place of the requested one (forced downgrade).
+    requested = version or get_chromium_version()
+    declared = _parse_manifest_version(manifest_text)
+    if declared != requested:
+        raise RuntimeError(
+            f"Version mismatch in signed SHA256SUMS: requested {requested}, "
+            f"manifest declares {declared or 'none'}. Refusing (possible downgrade)."
+        )
+
+    checksums = _parse_checksums(manifest_text)
     expected = checksums.get(tarball_name)
     if expected is None:
-        logger.warning("SHA256SUMS found but no entry for %s — skipping verification", tarball_name)
-        return
-
+        raise RuntimeError(
+            f"Signature-verified SHA256SUMS has no entry for {tarball_name} — "
+            f"cannot confirm binary integrity."
+        )
     _verify_checksum(file_path, expected)
+
+
+def _parse_manifest_version(text: str) -> str | None:
+    """Read the 'version=<v>' line from a signed manifest. None if absent.
+
+    The line has no internal whitespace so older wrappers' SHA256SUMS parsers
+    ignore it (they only accept '<hash>  <filename>' lines).
+    """
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("version="):
+            return line[len("version="):].strip()
+    return None
+
+
+def _fetch_signed_manifest(version: str | None = None) -> tuple[bytes, bytes] | None:
+    """Fetch (SHA256SUMS, SHA256SUMS.sig) raw bytes for a version, or None.
+
+    Both files are fetched from the SAME origin so the signature always matches
+    the exact manifest bytes it certifies. The primary origin is tried first,
+    then the GitHub Releases mirror. follow_redirects mirrors _fetch_checksums:
+    cloakbrowser.dev 301-redirects /chromium-v* to GitHub Releases.
+    """
+    v = version or get_chromium_version()
+    bases = [
+        f"{DOWNLOAD_BASE_URL}/chromium-v{v}",
+        f"{GITHUB_DOWNLOAD_BASE_URL}/chromium-v{v}",
+    ]
+    for base in bases:
+        try:
+            manifest_resp = httpx.get(
+                f"{base}/SHA256SUMS", follow_redirects=True, timeout=10.0
+            )
+            manifest_resp.raise_for_status()
+            sig_resp = httpx.get(
+                f"{base}/SHA256SUMS.sig", follow_redirects=True, timeout=10.0
+            )
+            sig_resp.raise_for_status()
+            return manifest_resp.content, sig_resp.content
+        except Exception:
+            continue
+    return None
+
+
+def _verify_signature(manifest_bytes: bytes, sig_b64: bytes) -> None:
+    """Verify a detached Ed25519 signature over the raw manifest bytes.
+
+    sig_b64 is the base64 of the 64-byte raw signature. Tries each pinned key
+    in BINARY_SIGNING_PUBKEYS; succeeds if any validates. Raises RuntimeError
+    if the signature is malformed or no pinned key validates it.
+    """
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    try:
+        signature = base64.b64decode(sig_b64.strip(), validate=True)
+    except Exception as exc:
+        raise RuntimeError(f"Malformed SHA256SUMS.sig (not valid base64): {exc}")
+
+    for pubkey_b64 in BINARY_SIGNING_PUBKEYS:
+        try:
+            pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(pubkey_b64))
+        except Exception:
+            # Skip an unparseable pinned key (e.g. the placeholder) rather than
+            # aborting — another pinned key may still validate.
+            continue
+        try:
+            pub.verify(signature, manifest_bytes)
+            logger.info("SHA256SUMS signature verified: Ed25519 OK")
+            return
+        except Exception:
+            # InvalidSignature, or a malformed/wrong-length signature that makes
+            # verify raise something else — either way this key didn't match,
+            # so try the next pinned key (and ultimately fail closed below).
+            continue
+
+    raise RuntimeError(
+        "SHA256SUMS signature verification failed — no pinned key validated the "
+        "manifest. The binary's authenticity could not be confirmed. "
+        "Report at https://github.com/CloakHQ/cloakbrowser/issues"
+    )
 
 
 def _fetch_checksums(version: str | None = None) -> dict[str, str] | None:
@@ -211,17 +351,22 @@ def _fetch_checksums(version: str | None = None) -> dict[str, str] | None:
 
 
 def _parse_checksums(text: str) -> dict[str, str]:
-    """Parse SHA256SUMS format: 'hash  filename' per line."""
+    """Parse SHA256SUMS format: '<64-hex sha256>  filename' per line.
+
+    Only lines whose first token is a 64-character hex digest are accepted
+    (matches the JS parser); blank lines, the version= line, and any other
+    junk are ignored.
+    """
     result = {}
     for line in text.strip().splitlines():
-        line = line.strip()
-        if not line:
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
             continue
-        parts = line.split(None, 1)
-        if len(parts) == 2:
-            hash_val, filename = parts
-            filename = filename.lstrip("*")
-            result[filename] = hash_val.lower()
+        hash_val, filename = parts
+        hash_val = hash_val.lower()
+        if len(hash_val) != 64 or any(c not in "0123456789abcdef" for c in hash_val):
+            continue
+        result[filename.lstrip("*")] = hash_val
     return result
 
 

@@ -38,6 +38,19 @@ export const PLATFORM_CHROMIUM_VERSIONS: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
+// Ed25519 public keys for verifying downloaded binaries.
+//
+// Each release publishes SHA256SUMS and a detached signature SHA256SUMS.sig.
+// The wrapper verifies that signature against the keys below before trusting
+// any hash in the manifest, so the download origin alone cannot certify a
+// tampered binary. Values are base64 of the 32-byte raw public key. Multiple
+// entries are accepted to allow key rotation. Keep in parity with config.py.
+// ---------------------------------------------------------------------------
+export const BINARY_SIGNING_PUBKEYS: string[] = [
+  "MKFKwIhUcKWq5xTuNA0Ovg99njcDEcEJvmWYYhApvaU=",
+];
+
+// ---------------------------------------------------------------------------
 // Platform detection
 // ---------------------------------------------------------------------------
 const SUPPORTED_PLATFORMS: Record<string, string> = {

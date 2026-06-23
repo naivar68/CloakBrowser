@@ -6,6 +6,12 @@ Changes are tagged: **[wrapper]** for Python/JS wrapper, **[binary]** for Chromi
 
 ---
 
+## [0.4.1] — 2026-06-23
+
+- **[wrapper]** Humanize: fix "Viewport size not available" crash on headed launches. Headed mode defaults to `no_viewport` (since 0.4.0), so `page.viewport_size` is `None` — human scroll now falls back to the live `window.innerWidth`/`window.innerHeight`. Covers Playwright (Python sync/async, JS) and Puppeteer.
+- **[wrapper]** **[docker]** Widevine: opt-in CDM auto-fetch for persistent contexts. Set `CLOAKBROWSER_FETCH_WIDEVINE` and the Docker entrypoint pulls the Widevine CDM from Google's component server (arch-aware, SHA-256 verified, atomic, cached), so DRM playback works without a local Chrome to copy from. Off by default; bare-metal Linux users can run `bin/fetch-widevine.py` directly.
+- **[meta]** First-launch banner now promotes the Pro tier (header badge dropped); refreshed README test-results stamp to Jun 2026 / Chromium 148.
+
 ## [0.4.0] — 2026-06-22
 
 - **[wrapper]** **CloakBrowser Pro**: all launch functions now accept a `license_key` parameter (`licenseKey` in JS); a key can also be supplied via the `CLOAKBROWSER_LICENSE_KEY` environment variable or a `~/.cloakbrowser/license.key` file. With a valid key the latest binary is downloaded from cloakbrowser.dev; without one, the free binary continues to download from GitHub Releases exactly as before. License validation is cached locally for 24h, and the Pro binary is authenticated with the same pinned Ed25519 signature as the free binary. A valid key whose Pro download or signature check fails surfaces a clear error rather than silently downgrading to the free binary. Adds `validate_license`/`LicenseInfo` exports and a `tier` field on `binary_info()`. Details: https://cloakbrowser.dev

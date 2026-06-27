@@ -150,9 +150,9 @@ page.goto("https://example.com")
 
 ---
 
-## Latest: v0.4.3 — CloakBrowser Pro + .NET 8 client (Chromium 148.0.7778.215.2)
+## Latest: v0.4.4 — Version pinning / rollback (Chromium 148.0.7778.215.3)
 
-- **CloakBrowser Pro** — the latest binary (Chromium 148.0.7778.215.2, 59 source-level patches) is available to Pro subscribers, now on **all platforms including macOS** (Apple Silicon + Intel); v146 stays free forever. Set a `license_key` (`licenseKey` in JS) or the `CLOAKBROWSER_LICENSE_KEY` env var and the wrapper fetches the latest build automatically. See [CloakBrowser Pro](#cloakbrowser-pro)
+- **CloakBrowser Pro** — the latest binary (Chromium 148.0.7778.215.3, 59 source-level patches) is available to Pro subscribers, now on **all platforms including macOS** (Apple Silicon + Intel); v146 stays free forever. Set a `license_key` (`licenseKey` in JS) or the `CLOAKBROWSER_LICENSE_KEY` env var and the wrapper fetches the latest build automatically. See [CloakBrowser Pro](#cloakbrowser-pro)
 - **.NET 8 / C# client** — CloakBrowser now ships as a NuGet package (`CloakBrowser`), mirroring the Python and JS wrappers.
 - **58 fingerprint patches** — rendering consistency improvements across Linux and Windows, corrected GPU/display/graphics parameters to match stock Chrome 146 profiles
 - **Windows native GPU passthrough** — real hardware values pass through directly instead of being spoofed, matching real browser behavior
@@ -188,7 +188,7 @@ The wrapper (Python + JS) is MIT, free forever. The binary uses a delayed
 free-release model:
 
 - **Free (v146)** — the previous binary, on [GitHub Releases](https://github.com/CloakHQ/cloakbrowser/releases). Goes stale within weeks as detection evolves.
-- **Pro (latest, Chromium 148.0.7778.215.2)** — the newest patches and Chromium upgrades first, so the [results below](#test-results) stay green as anti-bot systems change. Linux, Windows, and macOS (Apple Silicon + Intel).
+- **Pro (latest, Chromium 148.0.7778.215.3)** — the newest patches and Chromium upgrades first, so the [results below](#test-results) stay green as anti-bot systems change. Linux, Windows, and macOS (Apple Silicon + Intel).
 
 Anti-bot detection updates constantly, and an older binary degrades fast.
 Pro keeps you on the build that's actively maintained against it.

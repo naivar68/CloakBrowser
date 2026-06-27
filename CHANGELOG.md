@@ -6,6 +6,12 @@ Changes are tagged: **[wrapper]** for Python/JS wrapper, **[binary]** for Chromi
 
 ---
 
+## [0.4.4] — 2026-06-27
+
+- **[wrapper]** **Exact version pinning / rollback** — pin a specific Chromium build with `browser_version=` (`browserVersion` in JS, `BrowserVersion` in .NET) or the `CLOAKBROWSER_VERSION` environment variable, e.g. `launch(browser_version="148.0.7778.215.2")`. Works for both Free and Pro binaries and lets you roll back if a new build regresses on your site. A pin never overwrites the cached "latest" marker, so a later unpinned launch returns to the newest build. Python, JS, and .NET.
+- **[wrapper]** The Pro version check now sends the client platform so each OS resolves its own latest build independently — a new release for one platform no longer affects the others. Python, JS, and .NET.
+- **[binary]** Chromium **148.0.7778.215.3** (Pro) — fingerprint fixes and alignment across Linux, Windows, and macOS (Apple Silicon + Intel). Pro license required; v146 stays free.
+
 ## [0.4.3] — 2026-06-24
 
 - **[wrapper]** **.NET 8 / C# client** — CloakBrowser now ships as a NuGet package (`CloakBrowser`), mirroring the Python and JS wrappers. Contributed by [@evelaa123](https://github.com/evelaa123) in PR #385.

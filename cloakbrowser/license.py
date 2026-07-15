@@ -23,6 +23,7 @@ logger = logging.getLogger("cloakbrowser")
 
 VALIDATE_URL = "https://cloakbrowser.dev/api/license/validate"
 PRO_VERSION_URL = "https://cloakbrowser.dev/api/download/version"
+SESSION_COUNT_URL = "https://cloakbrowser.dev/api/license/session/count"
 
 LICENSE_CACHE_TTL = 86400  # 24 hours
 PRO_VERSION_CHECK_INTERVAL = 3600  # 1 hour
@@ -281,6 +282,27 @@ def get_pro_latest_version() -> str | None:
 
     except Exception as e:
         logger.debug("Pro version check failed: %s", e)
+        return None
+
+
+def get_active_session_count(license_key: str) -> int | None:
+    """How many concurrent sessions (seats) this license is holding right now.
+
+    Deliberately NOT cached: a cached seat count is a wrong seat count. Returns
+    None when the number is unknown — the server couldn't be reached, or it
+    reported the count as unavailable (it does that instead of a false 0 while
+    running in leaseless mode). Callers render None as "unavailable".
+    """
+    try:
+        resp = httpx.post(
+            SESSION_COUNT_URL,
+            json={"license_key": license_key},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return resp.json().get("active")
+    except Exception as e:
+        logger.debug("Session count lookup failed: %s", e)
         return None
 
 

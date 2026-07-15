@@ -49,6 +49,7 @@ public class LicenseTests : IDisposable
         Environment.SetEnvironmentVariable("CLOAKBROWSER_DOWNLOAD_URL", _prevDownloadUrl);
         License.ValidateLicenseOverride = null;
         License.ProLatestVersionOverride = null;
+        License.ActiveSessionCountOverride = null;
         try { if (Directory.Exists(_tmp)) Directory.Delete(_tmp, recursive: true); } catch (IOException) { }
     }
 
@@ -262,6 +263,122 @@ public class LicenseTests : IDisposable
                 Content = new StringContent(_body),
             });
         }
+    }
+
+    // =======================================================================
+    // GetActiveSessionCount — live seat count
+    // =======================================================================
+
+    /// <summary>Captures the request URI + body and returns a canned response.</summary>
+    private sealed class SessionCountHandler : HttpMessageHandler
+    {
+        private readonly string _body;
+        private readonly HttpStatusCode _status;
+        public string? LastUri { get; private set; }
+        public string? LastMethod { get; private set; }
+        public string? LastBody { get; private set; }
+        public int Calls { get; private set; }
+
+        public SessionCountHandler(string body, HttpStatusCode status = HttpStatusCode.OK)
+        {
+            _body = body;
+            _status = status;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Calls++;
+            LastUri = request.RequestUri?.ToString();
+            LastMethod = request.Method.Method;
+            LastBody = request.Content?.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult();
+            return Task.FromResult(new HttpResponseMessage(_status)
+            {
+                Content = new StringContent(_body),
+            });
+        }
+    }
+
+    private void WithSessionCountHttp(SessionCountHandler handler, Action body)
+    {
+        var original = License.Http;
+        License.Http = new HttpClient(handler);
+        try { body(); }
+        finally
+        {
+            License.Http.Dispose();
+            License.Http = original;
+        }
+    }
+
+    [Fact]
+    public void ActiveSessionCount_override_used()
+    {
+        License.ActiveSessionCountOverride = _ => 7;
+        Assert.Equal(7, License.GetActiveSessionCount("cb_key"));
+    }
+
+    [Fact]
+    public void ActiveSessionCount_returns_live_count()
+    {
+        var handler = new SessionCountHandler("{\"valid\":true,\"active\":3}");
+        WithSessionCountHttp(handler, () =>
+            Assert.Equal(3, License.GetActiveSessionCount("cb_key")));
+    }
+
+    [Fact]
+    public void ActiveSessionCount_posts_the_key_in_the_body()
+    {
+        // POST, not GET: the key is a live credential and a query string would
+        // land in the server's access log.
+        var handler = new SessionCountHandler("{\"valid\":true,\"active\":0}");
+        WithSessionCountHttp(handler, () => License.GetActiveSessionCount("cb_key"));
+
+        Assert.Equal(License.SessionCountUrl, handler.LastUri);
+        Assert.Equal("POST", handler.LastMethod);
+        Assert.Contains("cb_key", handler.LastBody!);
+    }
+
+    [Fact]
+    public void ActiveSessionCount_zero_is_not_confused_with_unknown()
+    {
+        // 0 is a real answer ("nothing running"); null means "couldn't tell".
+        // They print differently, so 0 must not collapse to null.
+        var handler = new SessionCountHandler("{\"valid\":true,\"active\":0}");
+        WithSessionCountHttp(handler, () =>
+            Assert.Equal(0, License.GetActiveSessionCount("cb_key")));
+    }
+
+    [Fact]
+    public void ActiveSessionCount_null_when_server_reports_unavailable()
+    {
+        // Leaseless mode on the server → {"active": null}, never a false 0.
+        var handler = new SessionCountHandler("{\"valid\":true,\"active\":null}");
+        WithSessionCountHttp(handler, () =>
+            Assert.Null(License.GetActiveSessionCount("cb_key")));
+    }
+
+    [Fact]
+    public void ActiveSessionCount_null_on_denial()
+    {
+        var handler = new SessionCountHandler(
+            "{\"valid\":false,\"error\":\"invalid_key\"}", HttpStatusCode.Forbidden);
+        WithSessionCountHttp(handler, () =>
+            Assert.Null(License.GetActiveSessionCount("cb_bad")));
+    }
+
+    [Fact]
+    public void ActiveSessionCount_is_never_cached()
+    {
+        // ValidateLicense caches 24h; a cached seat count would be a wrong seat
+        // count, so every call must hit the network.
+        var handler = new SessionCountHandler("{\"valid\":true,\"active\":2}");
+        WithSessionCountHttp(handler, () =>
+        {
+            License.GetActiveSessionCount("cb_key");
+            License.GetActiveSessionCount("cb_key");
+        });
+        Assert.Equal(2, handler.Calls);
     }
 
     // =======================================================================

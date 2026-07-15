@@ -53,6 +53,7 @@ public static class License
 {
     public const string ValidateUrl = "https://cloakbrowser.dev/api/license/validate";
     public const string ProVersionUrl = "https://cloakbrowser.dev/api/download/version";
+    public const string SessionCountUrl = "https://cloakbrowser.dev/api/license/session/count";
 
     // 24 hours / 1 hour, in seconds (matches Python's LICENSE_CACHE_TTL / PRO_VERSION_CHECK_INTERVAL).
     private const double LicenseCacheTtl = 86400;
@@ -123,6 +124,9 @@ public static class License
 
     /// <summary>Overrides the Pro latest-version lookup for tests. Null -> real HTTP.</summary>
     internal static Func<string?>? ProLatestVersionOverride;
+
+    /// <summary>Overrides the live seat-count lookup for tests. Null -> real HTTP.</summary>
+    internal static Func<string, int?>? ActiveSessionCountOverride;
 
     /// <summary>
     /// Resolves the user home directory used to detect the default
@@ -350,6 +354,39 @@ public static class License
         catch (Exception ex)
         {
             CloakLog.Debug("Pro version check failed: {0}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// How many concurrent sessions (seats) this license is holding right now.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately NOT cached: a cached seat count is a wrong seat count. Returns
+    /// null when the number is unknown — the server couldn't be reached, or it
+    /// reported the count as unavailable (it does that instead of a false 0 while
+    /// running in leaseless mode). Callers render null as "unavailable".
+    /// </remarks>
+    public static int? GetActiveSessionCount(string licenseKey)
+    {
+        if (ActiveSessionCountOverride != null)
+            return ActiveSessionCountOverride(licenseKey);
+
+        try
+        {
+            var body = new StringContent(
+                JsonSerializer.Serialize(new Dictionary<string, string> { ["license_key"] = licenseKey }),
+                Encoding.UTF8, "application/json");
+            using var resp = Http.PostAsync(SessionCountUrl, body).GetAwaiter().GetResult();
+            resp.EnsureSuccessStatusCode();
+            var json = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("active", out var a) && a.ValueKind == JsonValueKind.Number
+                ? a.GetInt32() : null;
+        }
+        catch (Exception ex)
+        {
+            CloakLog.Debug("Session count lookup failed: {0}", ex.Message);
             return null;
         }
     }

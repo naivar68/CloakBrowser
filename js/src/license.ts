@@ -15,6 +15,7 @@ import { getCacheDir, getPlatformTag } from "./config.js";
 
 const VALIDATE_URL = "https://cloakbrowser.dev/api/license/validate";
 const PRO_VERSION_URL = "https://cloakbrowser.dev/api/download/version";
+const SESSION_COUNT_URL = "https://cloakbrowser.dev/api/license/session/count";
 
 const LICENSE_CACHE_TTL_MS = 86_400_000; // 24 hours
 const PRO_VERSION_CHECK_INTERVAL_MS = 3_600_000; // 1 hour
@@ -312,6 +313,34 @@ export async function getProLatestVersion(): Promise<string | null> {
     }
 
     return version;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How many concurrent sessions (seats) this license is holding right now.
+ *
+ * Deliberately NOT cached: a cached seat count is a wrong seat count. Returns
+ * null when the number is unknown — the server couldn't be reached, or it
+ * reported the count as unavailable (it does that instead of a false 0 while
+ * running in leaseless mode). Callers render null as "unavailable".
+ */
+export async function getActiveSessionCount(licenseKey: string): Promise<number | null> {
+  try {
+    const resp = await fetch(SESSION_COUNT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ license_key: licenseKey }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    }
+
+    const data = (await resp.json()) as Record<string, unknown>;
+    return typeof data.active === "number" ? data.active : null;
   } catch {
     return null;
   }

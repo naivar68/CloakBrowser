@@ -8,6 +8,7 @@ import {
   resolveLicenseKey,
   validateLicense,
   getProLatestVersion,
+  getActiveSessionCount,
   buildLaunchEnv,
   licenseErrorMessage,
   licenseErrorFrom,
@@ -455,5 +456,69 @@ describe("license exit-code surfacing", () => {
     expect(lic).toBeInstanceOf(CloakBrowserLicenseError);
     expect(lic!.message).toContain("invalid");
     expect(licenseErrorFrom(new Error("some unrelated crash"))).toBeNull();
+  });
+});
+
+// ── getActiveSessionCount ─────────────────────────────
+
+describe("getActiveSessionCount", () => {
+  const ok = (payload: unknown) =>
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => payload,
+    } as Response);
+
+  it("returns the live seat count", async () => {
+    ok({ valid: true, active: 3 });
+    expect(await getActiveSessionCount("cb_key")).toBe(3);
+  });
+
+  it("posts the key in the body", async () => {
+    // POST, not GET: the key is a live credential and a query string would land
+    // in the server's access log.
+    ok({ valid: true, active: 0 });
+    await getActiveSessionCount("cb_key");
+
+    const [url, init] = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe("https://cloakbrowser.dev/api/license/session/count");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ license_key: "cb_key" });
+  });
+
+  it("distinguishes zero seats from an unknown count", async () => {
+    // 0 is a real answer ("nothing running"); null means "couldn't tell". They
+    // print differently, so 0 must not collapse to null.
+    ok({ valid: true, active: 0 });
+    expect(await getActiveSessionCount("cb_key")).toBe(0);
+  });
+
+  it("returns null when the server reports the count as unavailable", async () => {
+    // Leaseless mode on the server → {"active": null}, never a false 0.
+    ok({ valid: true, active: null });
+    expect(await getActiveSessionCount("cb_key")).toBeNull();
+  });
+
+  it("returns null on a network error rather than throwing", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("timeout"));
+    expect(await getActiveSessionCount("cb_key")).toBeNull();
+  });
+
+  it("returns null on a denial", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 403,
+      statusText: "Forbidden",
+      json: async () => ({ valid: false, error: "invalid_key" }),
+    } as Response);
+    expect(await getActiveSessionCount("cb_bad")).toBeNull();
+  });
+
+  it("is never cached", async () => {
+    // validateLicense caches 24h; a cached seat count would be a wrong seat
+    // count, so every call must hit the network.
+    ok({ valid: true, active: 2 });
+    await getActiveSessionCount("cb_key");
+    await getActiveSessionCount("cb_key");
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
 });
